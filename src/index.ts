@@ -37,7 +37,8 @@ app.get("/", (c) => {
 			"GET /container/<ID> - Start a container for each ID with a 2m timeout\n" +
 			"GET /lb - Load balance requests over multiple containers\n" +
 			"GET /error - Start a container that errors (demonstrates error handling)\n" +
-			"GET /singleton - Get a single specific container instance",
+			"GET /singleton - Get a single specific container instance\n" +
+			"POST /ffmpeg/<ID> - Extract MP3 audio from video using FFmpeg",
 	);
 });
 
@@ -65,6 +66,25 @@ app.get("/lb", async (c) => {
 app.get("/singleton", async (c) => {
 	const container = getContainer(c.env.MY_CONTAINER);
 	return await container.fetch(c.req.raw);
+});
+
+// FFmpeg endpoint - extract MP3 from video
+app.post("/ffmpeg/:id", async (c) => {
+	const id = c.req.param("id");
+	const containerId = c.env.MY_CONTAINER.idFromName(`/ffmpeg/${id}`);
+	const container = c.env.MY_CONTAINER.get(containerId);
+	
+	// Create a new request for the container's FFmpeg endpoint
+	const body = await c.req.text();
+	const newRequest = new Request("http://localhost:8080/ffmpeg/extract-audio", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: body,
+	});
+	
+	return await container.fetch(newRequest);
 });
 
 export default app;

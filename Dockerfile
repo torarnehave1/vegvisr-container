@@ -15,9 +15,17 @@ COPY container_src/*.go ./
 # Build
 RUN CGO_ENABLED=0 GOOS=linux go build -o /server
 
-FROM scratch
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+FROM alpine:latest
+
+# Install FFmpeg and other necessary tools
+RUN apk add --no-cache ffmpeg ca-certificates
+
+# Copy the built server
 COPY --from=build /server /server
+
+# Create a temporary directory for processing files
+RUN mkdir -p /tmp/processing
+
 EXPOSE 8080
 
 # Run
