@@ -3,7 +3,9 @@
 	"name": "vegvisr-container",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-10-08",
-	"compatibility_flags": ["nodejs_compat"],
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
 	"observability": {
 		"enabled": true
 	},
@@ -12,6 +14,13 @@
 			"class_name": "MyContainer",
 			"image": "./Dockerfile",
 			"max_instances": 10
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "AUDIO_STORAGE",
+			"bucket_name": "audio-from-video-files",
+			"remote": true
 		}
 	],
 	"durable_objects": {
@@ -24,7 +33,9 @@
 	},
 	"migrations": [
 		{
-			"new_sqlite_classes": ["MyContainer"],
+			"new_sqlite_classes": [
+				"MyContainer"
+			],
 			"tag": "v1"
 		}
 	],

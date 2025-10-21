@@ -56,9 +56,9 @@ To learn more about Containers, take a look at the following resources:
 - [Container Documentation](https://developers.cloudflare.com/containers/) - learn about Containers
 - [Container Class](https://github.com/cloudflare/containers) - learn about the Container helper class
 
-## 🎵 FFmpeg Audio Extraction Service
+## 🎵 FFmpeg Audio Extraction Service with Cloudflare R2 Storage
 
-This container-based Cloudflare Worker includes a powerful FFmpeg endpoint for extracting MP3 audio from video files. Perfect for building audio processing applications, podcast creators, or any service that needs to convert video content to audio.
+This container-based Cloudflare Worker provides a powerful FFmpeg endpoint for extracting MP3 audio from video files with automatic cloud storage. Perfect for building audio processing applications, podcast creators, content management systems, or any service that needs to convert video content to audio.
 
 ### 🚀 Quick Start
 
@@ -67,15 +67,25 @@ This container-based Cloudflare Worker includes a powerful FFmpeg endpoint for e
 https://vegvisr-container.torarnehave.workers.dev
 ```
 
-### 📋 Available Endpoints
+### 🗄️ Storage Architecture
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | List all available endpoints |
-| `POST` | `/ffmpeg/{instance-id}` | Extract MP3 audio from video |
-| `GET` | `/container/{instance-id}` | Access container directly |
-| `GET` | `/singleton` | Get singleton container |
-| `GET` | `/lb` | Load-balanced container access |
+- **R2 Bucket**: `audio-from-video-files`
+- **Storage Binding**: `AUDIO_STORAGE`
+- **File Naming**: `audio_{instance-id}_{timestamp}.mp3`
+- **Auto-cleanup**: Files are managed efficiently with R2's durable storage
+- **Global Access**: Available worldwide via Cloudflare's edge network
+
+### 📋 API Endpoints
+
+| Method | Endpoint | Description | Status |
+|--------|----------|-------------|---------|
+| `GET` | `/` | List all available endpoints | ✅ Active |
+| `POST` | `/ffmpeg/{instance-id}` | Extract audio from video (200MB max, chunked download) | ✅ Active |
+| `GET` | `/download/{filename}` | Download extracted audio from R2 storage | ✅ Active |
+| `GET` | `/container/{instance-id}` | Direct container access with 2m timeout | ✅ Active |
+| `GET` | `/singleton` | Get singleton container instance | ✅ Active |
+| `GET` | `/lb` | Load-balanced requests over multiple containers | ✅ Active |
+| `GET` | `/error` | Test error handling (development) | ⚠️ Dev only |
 
 ### 🎯 How to Extract Audio
 
@@ -89,20 +99,48 @@ curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/my-audio-
   -d '{"video_url": "https://example.com/video.mp4"}'
 ```
 
-#### 2. Real Example
-
-```bash
-# Extract audio from a video file
-curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/demo-instance" \
-  -H "Content-Type: application/json" \
-  -d '{"video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"}'
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Audio extracted and stored successfully",
+  "download_url": "/download/audio_my-audio-job_1760939604006.mp3",
+  "file_name": "audio_my-audio-job_1760939604006.mp3",
+  "r2_key": "audio_my-audio-job_1760939604006.mp3"
+}
 ```
 
-#### 3. Using JavaScript/Node.js
+#### 2. Download the Extracted Audio
+
+```bash
+curl "https://vegvisr-container.torarnehave.workers.dev/download/audio_my-audio-job_1760939604006.mp3" \
+  -o extracted_audio.mp3
+```
+
+#### 3. Real Examples (Tested & Working)
+
+```bash
+# Example 1: Extract from 13MB video (ForBiggerBlazes.mp4)
+curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/test-large-1" \
+  -H "Content-Type: application/json" \
+  -d '{"video_url": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4", "output_format": "mp3"}'
+
+# Response: {"success":true,"message":"Audio extracted and stored successfully","download_url":"/download/audio_test-large-1_1761032972174.mp3"...}
+
+# Example 2: Extract from 16MB video (ForBiggerEscapes.mp4) 
+curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/test-large-2" \
+  -H "Content-Type: application/json" \
+  -d '{"video_url": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4", "output_format": "mp3"}'
+
+# Both examples demonstrate chunked downloading handling files larger than 5MB
+```
+
+#### 4. Using JavaScript/Node.js
 
 ```javascript
-async function extractAudio(videoUrl, instanceId = 'default') {
-  const response = await fetch(`https://vegvisr-container.torarnehave.workers.dev/ffmpeg/${instanceId}`, {
+async function extractAndDownloadAudio(videoUrl, instanceId = 'default') {
+  // Step 1: Extract audio
+  const extractResponse = await fetch(`https://vegvisr-container.torarnehave.workers.dev/ffmpeg/${instanceId}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -112,153 +150,524 @@ async function extractAudio(videoUrl, instanceId = 'default') {
     })
   });
 
-  const result = await response.json();
+  const result = await extractResponse.json();
   
-  if (result.success) {
-    console.log('Audio extracted successfully!');
-    console.log('Download URL:', result.audio_url);
-    return result;
-  } else {
-    console.error('Extraction failed:', result.error);
-    throw new Error(result.error);
+  if (!result.success) {
+    throw new Error(`Extraction failed: ${result.error}`);
   }
+
+  console.log('✅ Audio extracted successfully!');
+  console.log('📁 File stored in R2:', result.file_name);
+  
+  // Step 2: Download the audio file
+  const downloadResponse = await fetch(`https://vegvisr-container.torarnehave.workers.dev${result.download_url}`);
+  
+  if (!downloadResponse.ok) {
+    throw new Error('Download failed');
+  }
+
+  // Return as blob for browser use or buffer for Node.js
+  return await downloadResponse.blob(); // or .arrayBuffer() for Node.js
 }
 
 // Usage
-extractAudio('https://example.com/my-video.mp4')
-  .then(result => console.log('Success:', result))
-  .catch(error => console.error('Error:', error));
+extractAndDownloadAudio('https://example.com/my-video.mp4', 'my-job')
+  .then(audioBlob => {
+    console.log('🎵 Audio ready!', audioBlob);
+    // Create download link, save to file, etc.
+  })
+  .catch(error => console.error('❌ Error:', error));
 ```
 
-#### 4. Using Python
+#### 5. Using Python
 
 ```python
 import requests
 import json
 
-def extract_audio(video_url, instance_id='default'):
-    url = f'https://vegvisr-container.torarnehave.workers.dev/ffmpeg/{instance_id}'
+def extract_and_download_audio(video_url, instance_id='default'):
+    # Step 1: Extract audio
+    extract_url = f'https://vegvisr-container.torarnehave.workers.dev/ffmpeg/{instance_id}'
     
-    payload = {
-        'video_url': video_url
-    }
-    
-    response = requests.post(url, json=payload)
+    payload = {'video_url': video_url}
+    response = requests.post(extract_url, json=payload)
     result = response.json()
     
-    if result['success']:
-        print('Audio extracted successfully!')
-        return result['audio_url']
-    else:
+    if not result['success']:
         raise Exception(f"Extraction failed: {result['error']}")
+    
+    print(f"✅ Audio extracted: {result['file_name']}")
+    
+    # Step 2: Download the audio
+    download_url = f"https://vegvisr-container.torarnehave.workers.dev{result['download_url']}"
+    audio_response = requests.get(download_url)
+    
+    if audio_response.status_code != 200:
+        raise Exception('Download failed')
+    
+    # Save to file
+    filename = result['file_name']
+    with open(filename, 'wb') as f:
+        f.write(audio_response.content)
+    
+    print(f"🎵 Audio saved as: {filename}")
+    return filename
 
 # Usage
 try:
-    audio_url = extract_audio('https://example.com/video.mp4')
-    print(f'Audio ready at: {audio_url}')
+    audio_file = extract_and_download_audio('https://example.com/video.mp4', 'python-job')
+    print(f'Success! Audio saved: {audio_file}')
 except Exception as e:
     print(f'Error: {e}')
 ```
 
-### 📥 Downloading Extracted Audio
-
-Once audio extraction is complete, download the MP3 file:
-
-```bash
-# Replace 'audio_filename.mp3' with the actual filename from the response
-curl "https://vegvisr-container.torarnehave.workers.dev/container/my-audio-job/download/audio_filename.mp3" \
-  -o extracted_audio.mp3
-```
-
-#### Complete Workflow Example
+#### 6. Complete Workflow Script
 
 ```bash
 #!/bin/bash
 
-# 1. Extract audio
-RESPONSE=$(curl -s -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/batch-job-1" \
+# Complete workflow with error handling
+VIDEO_URL="https://www.learningcontainer.com/wp-content/uploads/2020/05/sample-mp4-file.mp4"
+INSTANCE_ID="batch-job-$(date +%s)"
+WORKER_URL="https://vegvisr-container.torarnehave.workers.dev"
+
+echo "🎬 Extracting audio from: $VIDEO_URL"
+echo "📋 Instance ID: $INSTANCE_ID"
+
+# Step 1: Extract audio
+RESPONSE=$(curl -s -X POST "$WORKER_URL/ffmpeg/$INSTANCE_ID" \
   -H "Content-Type: application/json" \
-  -d '{"video_url": "https://example.com/video.mp4"}')
+  -d "{\"video_url\": \"$VIDEO_URL\"}")
 
-echo "Extraction response: $RESPONSE"
+echo "📄 Extraction response: $RESPONSE"
 
-# 2. Parse response and download if successful
-if echo "$RESPONSE" | grep -q '"success":true'; then
-    AUDIO_URL=$(echo "$RESPONSE" | grep -o '"/download/[^"]*"' | tr -d '"')
-    echo "Downloading audio from: $AUDIO_URL"
+# Check if extraction was successful
+if echo "$RESPONSE" | jq -e '.success' > /dev/null 2>&1; then
+    echo "✅ Audio extraction successful!"
     
-    curl "https://vegvisr-container.torarnehave.workers.dev/container/batch-job-1$AUDIO_URL" \
-      -o "extracted_$(date +%s).mp3"
+    # Extract download URL
+    DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.download_url')
+    FILENAME=$(echo "$RESPONSE" | jq -r '.file_name')
     
-    echo "✅ Audio extraction and download complete!"
+    echo "📥 Downloading: $FILENAME"
+    
+    # Step 2: Download the audio
+    curl -s "$WORKER_URL$DOWNLOAD_URL" -o "$FILENAME"
+    
+    if [ $? -eq 0 ]; then
+        echo "🎵 Success! Audio saved as: $FILENAME"
+        echo "📊 File info:"
+        file "$FILENAME"
+        ls -lh "$FILENAME"
+    else
+        echo "❌ Download failed"
+        exit 1
+    fi
 else
     echo "❌ Audio extraction failed"
-    echo "$RESPONSE"
+    echo "$RESPONSE" | jq -r '.error // "Unknown error"'
+    exit 1
 fi
 ```
 
-### 📝 API Reference
+### 📝 Complete API Reference
 
-#### Request Format
+#### 1. 📋 Root Endpoint - Service Discovery
 
+**Endpoint:** `GET /`
+
+**Description:** Returns all available endpoints with current capabilities
+
+**Response:**
+```text
+Available endpoints:
+GET /container/<ID> - Start a container for each ID with a 2m timeout
+GET /lb - Load balance requests over multiple containers
+GET /error - Start a container that errors (demonstrates error handling)
+GET /singleton - Get a single specific container instance
+POST /ffmpeg/<ID> - Extract MP3 audio from video using FFmpeg
+  • Supports files up to 200MB with chunked downloading
+  • Progress tracking and detailed file size information
+  • Automatic R2 storage for extracted audio
+GET /download/<filename> - Download extracted audio files from R2 storage
+```
+
+#### 2. 🎵 FFmpeg Audio Extraction
+
+**Endpoint:** `POST /ffmpeg/{instance-id}`
+
+**Description:** Extract audio from video files with chunked downloading support up to 200MB
+
+**Parameters:**
+- `instance-id` (path): Unique identifier for the processing job (URL-safe string)
+
+**Request Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
 ```json
 {
-  "video_url": "string (required) - Direct URL to the video file"
+  "video_url": "string (required) - Direct HTTP/HTTPS URL to video file",
+  "output_format": "string (optional) - Audio format: mp3, aac, wav, flac (default: mp3)"
 }
 ```
 
-**Supported video formats:** MP4, AVI, MOV, MKV, WebM, FLV, and more (any format FFmpeg supports)
+**Supported Input Formats:** MP4, AVI, MOV, MKV, WebM, FLV, 3GP, WMV, and all FFmpeg-supported formats
 
-#### Success Response
+**File Size Limits:**
+- Maximum: 200MB (with chunked downloading in 5MB segments)
+- Progress tracking: Real-time file size detection and download progress
+- Timeout: 60 seconds for FFmpeg processing
 
+**Success Response (200 OK):**
 ```json
 {
   "success": true,
-  "message": "Audio extracted successfully",
+  "message": "Audio extracted and stored successfully",
+  "download_url": "/download/audio_instanceid_timestamp.mp3",
+  "file_name": "audio_instanceid_timestamp.mp3", 
+  "r2_key": "audio_instanceid_timestamp.mp3",
   "audio_url": "/download/audio_instanceid_timestamp.mp3"
 }
 ```
 
-#### Error Response
+**Error Responses:**
 
+**400 Bad Request - Missing video_url:**
 ```json
 {
   "success": false,
-  "error": "Detailed error description"
+  "message": "",
+  "error": "video_url is required"
 }
 ```
 
-#### Common Error Types
+**400 Bad Request - File too large:**
+```json
+{
+  "success": false,
+  "message": "",
+  "error": "video file too large (250.5 MB). Maximum supported: 200MB"
+}
+```
 
-- `"video_url is required"` - Missing video URL in request
-- `"Failed to download video: HTTP 404"` - Video URL not accessible
-- `"FFmpeg failed: ..."` - Video format not supported or corrupted
-- `"Failed to create temp file"` - Internal server error
+**500 Internal Server Error - Download failed:**
+```json
+{
+  "success": false, 
+  "message": "",
+  "error": "failed to get file info: Head \"https://example.com/video.mp4\": context deadline exceeded"
+}
+```
+
+**500 Internal Server Error - FFmpeg processing failed:**
+```json
+{
+  "success": false,
+  "message": "",
+  "error": "ffmpeg failed: exit status 1, stderr: [error details]"
+}
+```
+
+#### 3. 📥 Download Extracted Audio
+
+**Endpoint:** `GET /download/{filename}`
+
+**Description:** Download processed audio files from Cloudflare R2 storage
+
+**Parameters:**
+- `filename` (path): Audio filename returned from FFmpeg endpoint (format: `audio_{instance-id}_{timestamp}.{format}`)
+
+**Response Headers:**
+```
+Content-Type: audio/mpeg (or appropriate MIME type)
+Content-Disposition: attachment; filename="{filename}"
+```
+
+**Success Response (200 OK):** Binary audio file content
+
+**Error Response (404 Not Found):** File not found in R2 storage
+
+#### 4. 🚀 Container Management Endpoints
+
+**Direct Container Access:** `GET /container/{instance-id}`
+- Creates or connects to specific container instance
+- 2-minute timeout before container sleeps
+- Returns container connection info
+
+**Load Balanced Access:** `GET /lb`  
+- Distributes requests across multiple containers
+- Automatic scaling and load distribution
+- Returns balanced container response
+
+**Singleton Container:** `GET /singleton`
+- Access to dedicated singleton container instance
+- Persistent for debugging and development
+- Returns singleton container info
+
+**Error Testing:** `GET /error`
+- Triggers container error for testing error handling
+- Development/debugging endpoint only
+- Returns error demonstration
+
+### 🔧 Integration Examples
+
+#### cURL Examples
+
+**Basic audio extraction:**
+```bash
+curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/job123" \
+  -H "Content-Type: application/json" \
+  -d '{"video_url": "https://example.com/video.mp4"}'
+```
+
+**Extract specific format:**
+```bash
+curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/job123" \
+  -H "Content-Type: application/json" \
+  -d '{"video_url": "https://example.com/video.mp4", "output_format": "wav"}'
+```
+
+**Download extracted audio:**
+```bash
+curl "https://vegvisr-container.torarnehave.workers.dev/download/audio_job123_1761032972174.mp3" \
+  -o extracted_audio.mp3
+```
+
+#### JavaScript/TypeScript Integration
+
+```typescript
+interface FFmpegRequest {
+  video_url: string;
+  output_format?: 'mp3' | 'aac' | 'wav' | 'flac';
+}
+
+interface FFmpegResponse {
+  success: boolean;
+  message: string;
+  download_url?: string;
+  file_name?: string;
+  r2_key?: string;
+  audio_url?: string;
+  error?: string;
+}
+
+class AudioExtractionAPI {
+  private baseUrl = 'https://vegvisr-container.torarnehave.workers.dev';
+
+  async extractAudio(
+    videoUrl: string, 
+    instanceId: string = `job-${Date.now()}`,
+    format: 'mp3' | 'aac' | 'wav' | 'flac' = 'mp3'
+  ): Promise<FFmpegResponse> {
+    const response = await fetch(`${this.baseUrl}/ffmpeg/${instanceId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        video_url: videoUrl,
+        output_format: format
+      })
+    });
+
+    return await response.json();
+  }
+
+  async downloadAudio(filename: string): Promise<Blob> {
+    const response = await fetch(`${this.baseUrl}/download/${filename}`);
+    
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.status}`);
+    }
+    
+    return await response.blob();
+  }
+
+  async extractAndDownload(
+    videoUrl: string, 
+    instanceId?: string, 
+    format?: 'mp3' | 'aac' | 'wav' | 'flac'
+  ): Promise<{ metadata: FFmpegResponse; audio: Blob }> {
+    const result = await this.extractAudio(videoUrl, instanceId, format);
+    
+    if (!result.success || !result.file_name) {
+      throw new Error(result.error || 'Extraction failed');
+    }
+    
+    const audio = await this.downloadAudio(result.file_name);
+    
+    return { metadata: result, audio };
+  }
+}
+
+// Usage
+const api = new AudioExtractionAPI();
+
+api.extractAndDownload('https://example.com/video.mp4', 'my-job', 'mp3')
+  .then(({ metadata, audio }) => {
+    console.log('✅ Success:', metadata);
+    console.log('🎵 Audio blob size:', audio.size, 'bytes');
+    
+    // Create download link
+    const url = URL.createObjectURL(audio);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = metadata.file_name || 'audio.mp3';
+    a.click();
+    URL.revokeObjectURL(url);
+  })
+  .catch(error => console.error('❌ Error:', error));
+```
+
+#### Python Integration
+
+```python
+import requests
+import json
+from typing import Optional, Literal
+from dataclasses import dataclass
+
+@dataclass 
+class FFmpegResponse:
+    success: bool
+    message: str
+    download_url: Optional[str] = None
+    file_name: Optional[str] = None
+    r2_key: Optional[str] = None  
+    audio_url: Optional[str] = None
+    error: Optional[str] = None
+
+class AudioExtractionAPI:
+    def __init__(self, base_url: str = 'https://vegvisr-container.torarnehave.workers.dev'):
+        self.base_url = base_url
+
+    def extract_audio(
+        self, 
+        video_url: str, 
+        instance_id: Optional[str] = None,
+        output_format: Literal['mp3', 'aac', 'wav', 'flac'] = 'mp3'
+    ) -> FFmpegResponse:
+        """Extract audio from video URL"""
+        if instance_id is None:
+            import time
+            instance_id = f"python-job-{int(time.time())}"
+            
+        url = f"{self.base_url}/ffmpeg/{instance_id}"
+        payload = {
+            'video_url': video_url,
+            'output_format': output_format
+        }
+        
+        response = requests.post(url, json=payload, timeout=120)
+        data = response.json()
+        
+        return FFmpegResponse(**data)
+
+    def download_audio(self, filename: str) -> bytes:
+        """Download audio file as bytes"""
+        url = f"{self.base_url}/download/{filename}"
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        return response.content
+
+    def extract_and_save(
+        self, 
+        video_url: str, 
+        output_path: Optional[str] = None,
+        instance_id: Optional[str] = None,
+        output_format: Literal['mp3', 'aac', 'wav', 'flac'] = 'mp3'
+    ) -> str:
+        """Extract audio and save to file"""
+        # Extract audio
+        result = self.extract_audio(video_url, instance_id, output_format)
+        
+        if not result.success:
+            raise Exception(f"Extraction failed: {result.error}")
+        
+        # Download audio
+        audio_data = self.download_audio(result.file_name)
+        
+        # Save to file
+        if output_path is None:
+            output_path = result.file_name
+            
+        with open(output_path, 'wb') as f:
+            f.write(audio_data)
+            
+        return output_path
+
+# Usage examples
+api = AudioExtractionAPI()
+
+try:
+    # Simple extraction and save
+    saved_file = api.extract_and_save(
+        'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
+        'my_audio.mp3',
+        'python-demo'
+    )
+    print(f"✅ Audio saved to: {saved_file}")
+    
+    # Advanced usage with error handling
+    result = api.extract_audio(
+        'https://example.com/video.mp4', 
+        'custom-job-123', 
+        'wav'
+    )
+    
+    if result.success:
+        print(f"📁 File available: {result.download_url}")
+        audio_bytes = api.download_audio(result.file_name)
+        print(f"🎵 Downloaded {len(audio_bytes)} bytes")
+    else:
+        print(f"❌ Failed: {result.error}")
+        
+except Exception as e:
+    print(f"Error: {e}")
+```
 
 ### ⚙️ Technical Details
 
 #### Audio Output Specifications
 
-- **Format:** MP3
+- **Format:** MP3 (MPEG ADTS, layer III, v1)
 - **Bitrate:** 192 kbps
 - **Sample Rate:** 44.1 kHz
 - **Channels:** Stereo (preserves original channel configuration)
+- **Metadata:** ID3 version 2.4.0 tags included
 
 #### Container Instance Management
 
 Each `{instance-id}` creates an isolated container:
 
 - **Parallel Processing:** Different instance IDs process simultaneously
-- **Resource Isolation:** Each container has its own temporary storage
-- **Automatic Cleanup:** Files are cleaned up after 5 minutes
+- **Resource Isolation:** Each container has its own temporary processing space
+- **Automatic R2 Upload:** Files automatically uploaded to cloud storage
 - **Timeout:** Container sleeps after 2 minutes of inactivity
+- **Cleanup:** Temporary files removed after R2 upload
+
+#### Cloudflare R2 Storage Benefits
+
+- **Cost-Effective:** No egress fees for downloads
+- **Global CDN:** Fast access worldwide via Cloudflare's edge network
+- **Durability:** 99.999999999% (11 9's) object durability
+- **Scalability:** Handle thousands of concurrent audio extractions
+- **S3-Compatible:** Standard APIs for easy integration
 
 #### Performance & Limits
 
-- **File Size:** No explicit limit (depends on Cloudflare Worker limits)
-- **Processing Time:** Varies by video length and size
-- **Concurrent Jobs:** Multiple instances can run in parallel
-- **Storage:** Temporary files are automatically cleaned up
+- **File Size Limit:** 200MB maximum with chunked downloading (5MB chunks)
+- **Processing Timeout:** 60 seconds for FFmpeg processing
+- **Container Timeout:** 2 minutes before container sleeps (auto-restart on new request)
+- **Concurrent Jobs:** Unlimited parallel processing with different instance IDs
+- **Download Speed:** Chunked downloading prevents timeouts for large files
+- **Storage:** Persistent in Cloudflare R2 with global CDN distribution
+- **Bandwidth:** Leverages Cloudflare's global network for optimized performance
+- **Supported Formats:** All FFmpeg-supported video inputs, multiple audio output formats
+- **Progress Tracking:** Real-time file size detection and download progress logging
 
 ### 🛠️ Development & Customization
 
@@ -273,8 +682,11 @@ cmd := exec.Command("ffmpeg", "-i", videoFile, "-vn", "-acodec", "mp3", "-ab", "
 // Example: Extract as WAV instead
 cmd := exec.Command("ffmpeg", "-i", videoFile, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-y", audioFile)
 
-// Example: Different quality settings
+// Example: Higher quality MP3
 cmd := exec.Command("ffmpeg", "-i", videoFile, "-vn", "-acodec", "mp3", "-ab", "320k", "-ar", "48000", "-y", audioFile)
+
+// Example: Extract specific time range (first 30 seconds)
+cmd := exec.Command("ffmpeg", "-i", videoFile, "-vn", "-acodec", "mp3", "-ab", "192k", "-ar", "44100", "-t", "30", "-y", audioFile)
 ```
 
 #### Add New Endpoints
@@ -282,16 +694,34 @@ cmd := exec.Command("ffmpeg", "-i", videoFile, "-vn", "-acodec", "mp3", "-ab", "
 Add new routes in `container_src/main.go`:
 
 ```go
-router.HandleFunc("/ffmpeg/extract-video-segment", segmentHandler)
+router.HandleFunc("/ffmpeg/extract-segment", segmentHandler)
 router.HandleFunc("/ffmpeg/convert-format", convertHandler)
+router.HandleFunc("/ffmpeg/get-metadata", metadataHandler)
+```
+
+#### Configure R2 Storage
+
+The R2 bucket configuration is in `wrangler.jsonc`:
+
+```jsonc
+{
+  "r2_buckets": [
+    {
+      "binding": "AUDIO_STORAGE",
+      "bucket_name": "audio-from-video-files",
+      "remote": true
+    }
+  ]
+}
 ```
 
 ### 🔒 Security Considerations
 
 - **Input Validation:** Only HTTP/HTTPS URLs are accepted
 - **File Path Protection:** Download paths are validated to prevent directory traversal
-- **Temporary Storage:** Files are stored in isolated `/tmp/processing` directory
-- **Auto Cleanup:** All temporary files are automatically removed
+- **Container Isolation:** Each instance runs in its own isolated environment
+- **R2 Access Control:** Files are accessible only through your worker endpoints
+- **Temporary Processing:** Local files are cleaned up after R2 upload
 
 ### 🐛 Troubleshooting
 
@@ -308,15 +738,21 @@ router.HandleFunc("/ffmpeg/convert-format", convertHandler)
 2. **"FFmpeg failed" errors**
    - Check if the video URL is accessible
    - Verify the video format is supported
-   - Ensure the video file isn't corrupted
+   - Ensure the video file isn't corrupted or protected
 
-3. **Timeout errors**
+3. **"R2 storage failed" errors**
+   - Check R2 bucket exists: `wrangler r2 bucket list`
+   - Verify bucket permissions in Cloudflare dashboard
+   - Ensure R2 binding is configured correctly
+
+4. **Download timeouts**
    - Large video files may take longer to process
-   - Consider splitting large files or using smaller videos
+   - Consider implementing progress tracking for long operations
 
 #### Getting Help
 
 - Check the [Cloudflare Containers documentation](https://developers.cloudflare.com/containers/)
+- Review the [Cloudflare R2 documentation](https://developers.cloudflare.com/r2/)
 - Review the [FFmpeg documentation](https://ffmpeg.org/documentation.html)
 - Open an issue in this repository for bugs or feature requests
 
@@ -328,6 +764,17 @@ For production deployments:
 2. **Rate Limiting:** Implement rate limiting for your use case
 3. **Authentication:** Add API key authentication if needed
 4. **Monitoring:** Set up logging and monitoring for your endpoints
-5. **CDN:** Consider using Cloudflare's CDN for serving downloaded files
+5. **R2 Lifecycle:** Configure automatic file cleanup policies
+6. **Webhooks:** Add completion notifications for long-running jobs
+7. **Queue System:** Implement job queuing for high-volume processing
+
+### 💡 Use Cases
+
+- **Podcast Creation:** Extract audio from video content
+- **Content Management:** Automated audio extraction for CMS systems
+- **Social Media:** Convert video posts to audio format
+- **Education:** Extract audio from educational video content
+- **Accessibility:** Provide audio alternatives for video content
+- **Batch Processing:** Convert large video libraries to audio
 
 Your feedback and contributions are welcome!

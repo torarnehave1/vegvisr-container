@@ -17,8 +17,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /server
 
 FROM alpine:latest
 
-# Install FFmpeg and other necessary tools
-RUN apk add --no-cache ffmpeg ca-certificates
+# Install FFmpeg, yt-dlp, Python, and other necessary tools
+RUN apk add --no-cache ffmpeg ca-certificates python3 py3-pip && \
+    pip3 install --break-system-packages yt-dlp
 
 # Copy the built server
 COPY --from=build /server /server

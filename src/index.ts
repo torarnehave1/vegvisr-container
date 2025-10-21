@@ -8,7 +8,7 @@ export class MyContainer extends Container<Env> {
 	sleepAfter = "2m";
 	// Environment variables passed to the container
 	envVars = {
-		MESSAGE: "I was passed in via the container class!",
+		MESSAGE: "Container with 200MB chunked download support - v2!",
 	};
 
 	// Optional lifecycle hooks
@@ -38,7 +38,11 @@ app.get("/", (c) => {
 			"GET /lb - Load balance requests over multiple containers\n" +
 			"GET /error - Start a container that errors (demonstrates error handling)\n" +
 			"GET /singleton - Get a single specific container instance\n" +
-			"POST /ffmpeg/<ID> - Extract MP3 audio from video using FFmpeg",
+			"POST /ffmpeg/<ID> - Extract MP3 audio from video using FFmpeg\n" +
+			"  • Supports files up to 200MB with chunked downloading\n" +
+			"  • Progress tracking and detailed file size information\n" +
+			"  • Automatic R2 storage for extracted audio\n" +
+			"GET /download/<filename> - Download extracted audio files from R2 storage",
 	);
 });
 
@@ -68,7 +72,7 @@ app.get("/singleton", async (c) => {
 	return await container.fetch(c.req.raw);
 });
 
-// FFmpeg endpoint - extract MP3 from video
+// FFmpeg endpoint - extract MP3 from video with R2 storage
 app.post("/ffmpeg/:id", async (c) => {
 	const id = c.req.param("id");
 	const containerId = c.env.MY_CONTAINER.idFromName(`/ffmpeg/${id}`);
@@ -76,7 +80,95 @@ app.post("/ffmpeg/:id", async (c) => {
 	
 	// Create a new request for the container's FFmpeg endpoint
 	const body = await c.req.text();
+	const requestData = JSON.parse(body);
+	
+	// Add R2 storage configuration to the request
+	const enhancedRequest = {
+		...requestData,
+		use_r2_storage: true,
+		instance_id: id
+	};
+	
 	const newRequest = new Request("http://localhost:8080/ffmpeg/extract-audio", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(enhancedRequest),
+	});
+	
+	const containerResponse = await container.fetch(newRequest);
+	const result = await containerResponse.json() as {
+		success: boolean;
+		message?: string;
+		audio_data?: string;
+		error?: string;
+	};
+	
+	// If audio was extracted successfully, upload to R2
+	if (result.success && result.audio_data) {
+		try {
+			// Create a unique filename
+			const timestamp = Date.now();
+			const fileName = `audio_${id}_${timestamp}.mp3`;
+			
+			// Upload to R2
+			const audioBuffer = Uint8Array.from(atob(result.audio_data), c => c.charCodeAt(0));
+			await c.env.AUDIO_STORAGE.put(fileName, audioBuffer, {
+				httpMetadata: {
+					contentType: "audio/mpeg"
+				}
+			});
+			
+			// Return download URL
+			return c.json({
+				success: true,
+				message: "Audio extracted and stored successfully",
+				download_url: `/download/${fileName}`,
+				file_name: fileName,
+				r2_key: fileName
+			});
+		} catch (error: any) {
+			return c.json({
+				success: false,
+				error: `R2 storage failed: ${error.message}`
+			});
+		}
+	}
+	
+	return c.json(result);
+});
+
+// Download endpoint for R2-stored files
+app.get("/download/:filename", async (c) => {
+	const filename = c.req.param("filename");
+	
+	try {
+		const object = await c.env.AUDIO_STORAGE.get(filename);
+		
+		if (object === null) {
+			return c.json({ error: "File not found" }, 404);
+		}
+		
+		const headers = new Headers();
+		headers.set("Content-Type", "audio/mpeg");
+		headers.set("Content-Disposition", `attachment; filename="${filename}"`);
+		
+		return new Response(object.body, { headers });
+	} catch (error: any) {
+		return c.json({ error: `Download failed: ${error.message}` }, 500);
+	}
+});
+
+// YouTube info endpoint
+app.post("/youtube/:id/info", async (c) => {
+	const id = c.req.param("id");
+	const containerId = c.env.MY_CONTAINER.idFromName(`/youtube/${id}`);
+	const container = c.env.MY_CONTAINER.get(containerId);
+	
+	// Create a new request for the container's YouTube info endpoint
+	const body = await c.req.text();
+	const newRequest = new Request("http://localhost:8080/youtube/info", {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
