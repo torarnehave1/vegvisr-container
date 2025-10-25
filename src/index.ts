@@ -42,6 +42,9 @@ app.get("/", (c) => {
 			"  • Supports files up to 200MB with chunked downloading\n" +
 			"  • Progress tracking and detailed file size information\n" +
 			"  • Automatic R2 storage for extracted audio\n" +
+			"POST /upload/<ID> - Upload video files directly (auto-handles small & large files up to 100MB)\n" +
+			"  • Smart file size detection (≤15MB: direct processing, >15MB: R2-based)\n" +
+			"  • Perfect for QuickTime screen recordings and presentations\n" +
 			"GET /download/<filename> - Download extracted audio files from R2 storage",
 	);
 });
@@ -137,6 +140,242 @@ app.post("/ffmpeg/:id", async (c) => {
 	}
 	
 	return c.json(result);
+});
+
+// Upload endpoint - unified smart upload that handles all file sizes
+app.post("/upload/:id", async (c) => {
+	const id = c.req.param("id");
+	const containerId = c.env.MY_CONTAINER.idFromName(`/upload/${id}`);
+	const container = c.env.MY_CONTAINER.get(containerId);
+	
+	try {
+		// Parse form data
+		const formData = await c.req.formData();
+		const videoFile = (formData.get('video') || formData.get('file')) as File;
+		const outputFormat = formData.get('output_format') as string || 'mp3';
+		
+		if (!videoFile) {
+			return c.json({
+				success: false,
+				error: "No video file provided (use 'video' or 'file' field name)"
+			});
+		}
+		
+		const fileSizeMB = videoFile.size / (1024 * 1024);
+		console.log(`Processing file: ${videoFile.name}, size: ${fileSizeMB.toFixed(1)}MB`);
+		
+		// Check maximum file size
+		if (videoFile.size > 100 * 1024 * 1024) {
+			return c.json({
+				success: false,
+				error: `File too large (${fileSizeMB.toFixed(1)}MB). Maximum supported: 100MB`
+			});
+		}
+		
+		// Smart routing based on file size
+		// For large files (> 15MB), upload to R2 first to avoid memory issues
+		if (videoFile.size > 15 * 1024 * 1024) {
+			console.log(`Large file detected (${fileSizeMB.toFixed(1)}MB), uploading to R2 first`);
+			
+			// Generate unique R2 key
+			const timestamp = Date.now();
+			const r2Key = `temp-uploads/${id}/${timestamp}_${videoFile.name}`;
+			
+			// Upload to R2 first
+			await c.env.AUDIO_STORAGE.put(r2Key, videoFile.stream(), {
+				httpMetadata: {
+					contentType: videoFile.type || 'video/quicktime'
+				}
+			});
+			
+			console.log(`File uploaded to R2: ${r2Key}`);
+			
+			// Get the file back from R2
+			const object = await c.env.AUDIO_STORAGE.get(r2Key);
+			
+			if (!object) {
+				return c.json({
+					success: false,
+					error: "File upload to R2 failed"
+				});
+			}
+			
+			// Download file from R2 in chunks
+			const videoData = await object.arrayBuffer();
+			
+			// Convert to base64 in chunks
+			const uint8Array = new Uint8Array(videoData);
+			let binaryString = '';
+			const chunkSize = 8192;
+			for (let i = 0; i < uint8Array.length; i += chunkSize) {
+				const chunk = uint8Array.subarray(i, Math.min(i + chunkSize, uint8Array.length));
+				binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+			}
+			const videoBase64 = btoa(binaryString);
+			
+			// Send to container for processing
+			const containerRequest = {
+				video_data: videoBase64,
+				filename: videoFile.name,
+				file_size: videoFile.size,
+				output_format: outputFormat,
+				instance_id: id
+			};
+			
+			const newRequest = new Request("http://localhost:8080/ffmpeg/upload-base64", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(containerRequest),
+			});
+			
+			const containerResponse = await container.fetch(newRequest);
+			
+			if (!containerResponse.ok) {
+				const errorText = await containerResponse.text();
+				await c.env.AUDIO_STORAGE.delete(r2Key);
+				return c.json({
+					success: false,
+					error: `Container returned ${containerResponse.status}: ${errorText}`
+				});
+			}
+			
+			const result = await containerResponse.json() as {
+				success: boolean;
+				message?: string;
+				download_url?: string;
+				file_name?: string;
+				r2_key?: string;
+				audio_url?: string;
+				audio_data?: string;
+				error?: string;
+			};
+			
+			// If audio was extracted, upload to R2
+			if (result.success && result.audio_data && result.file_name) {
+				try {
+					const audioBuffer = Uint8Array.from(atob(result.audio_data), c => c.charCodeAt(0));
+					await c.env.AUDIO_STORAGE.put(result.file_name, audioBuffer, {
+						httpMetadata: {
+							contentType: "audio/mpeg"
+						}
+					});
+					
+					// Clean up the temp video file from R2
+					await c.env.AUDIO_STORAGE.delete(r2Key);
+					
+					return c.json({
+						success: true,
+						message: result.message,
+						download_url: result.download_url,
+						file_name: result.file_name,
+						r2_key: result.r2_key,
+						audio_url: result.audio_url
+					});
+				} catch (error: any) {
+					await c.env.AUDIO_STORAGE.delete(r2Key);
+					return c.json({
+						success: false,
+						error: `R2 storage failed: ${error.message}`
+					});
+				}
+			}
+			
+			await c.env.AUDIO_STORAGE.delete(r2Key);
+			return c.json(result);
+			
+		} else {
+			// Small files (≤ 15MB) - direct base64 encoding approach
+			console.log(`Small file (${fileSizeMB.toFixed(1)}MB), using direct processing`);
+			
+			// Convert file to base64 using chunked approach
+			const videoBuffer = await videoFile.arrayBuffer();
+			const uint8Array = new Uint8Array(videoBuffer);
+			
+			// Convert to binary string in chunks to avoid call stack size exceeded
+			let binaryString = '';
+			const chunkSize = 8192;
+			for (let i = 0; i < uint8Array.length; i += chunkSize) {
+				const chunk = uint8Array.subarray(i, Math.min(i + chunkSize, uint8Array.length));
+				binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+			}
+			
+			const videoBase64 = btoa(binaryString);
+			
+			// Send to container as JSON
+			const containerRequest = {
+				video_data: videoBase64,
+				filename: videoFile.name,
+				file_size: videoFile.size,
+				output_format: outputFormat,
+				instance_id: id
+			};
+			
+			const newRequest = new Request("http://localhost:8080/ffmpeg/upload-base64", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(containerRequest),
+			});
+			
+			const containerResponse = await container.fetch(newRequest);
+			
+			if (!containerResponse.ok) {
+				const errorText = await containerResponse.text();
+				return c.json({
+					success: false,
+					error: `Container returned ${containerResponse.status}: ${errorText}`
+				});
+			}
+			
+			const result = await containerResponse.json() as {
+				success: boolean;
+				message?: string;
+				download_url?: string;
+				file_name?: string;
+				r2_key?: string;
+				audio_url?: string;
+				audio_data?: string;
+				error?: string;
+			};
+			
+			// If audio was extracted successfully, upload to R2
+			if (result.success && result.audio_data && result.file_name) {
+				try {
+					const audioBuffer = Uint8Array.from(atob(result.audio_data), c => c.charCodeAt(0));
+					await c.env.AUDIO_STORAGE.put(result.file_name, audioBuffer, {
+						httpMetadata: {
+							contentType: "audio/mpeg"
+						}
+					});
+					
+					return c.json({
+						success: true,
+						message: result.message,
+						download_url: result.download_url,
+						file_name: result.file_name,
+						r2_key: result.r2_key,
+						audio_url: result.audio_url
+					});
+				} catch (error: any) {
+					return c.json({
+						success: false,
+						error: `R2 storage failed: ${error.message}`
+					});
+				}
+			}
+			
+			return c.json(result);
+		}
+		
+	} catch (error: any) {
+		return c.json({
+			success: false,
+			error: `Upload processing failed: ${error.message}`
+		});
+	}
 });
 
 // Download endpoint for R2-stored files
