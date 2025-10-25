@@ -1,5 +1,6 @@
 import { Container, getContainer, getRandom } from "@cloudflare/containers";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 
 export class MyContainer extends Container<Env> {
 	// Port the container listens on (default: 8080)
@@ -29,6 +30,14 @@ export class MyContainer extends Container<Env> {
 const app = new Hono<{
 	Bindings: Env;
 }>();
+
+// Add CORS middleware to allow requests from any origin
+app.use('/*', cors({
+	origin: '*',
+	allowMethods: ['GET', 'POST', 'OPTIONS'],
+	allowHeaders: ['Content-Type'],
+	maxAge: 86400,
+}));
 
 // Home route with available endpoints
 app.get("/", (c) => {
