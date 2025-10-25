@@ -27,6 +27,456 @@ func errorHandler(w http.ResponseWriter, r *http.Request) {
 	panic("This is a panic")
 }
 
+func readmeHandler(w http.ResponseWriter, r *http.Request) {
+	// GitHub raw content URL for README.md
+	githubURL := "https://raw.githubusercontent.com/torarnehave1/vegvisr-container/main/README.md"
+	
+	log.Printf("Fetching README.md from GitHub: %s", githubURL)
+	
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	
+	// Fetch README from GitHub
+	resp, err := client.Get(githubURL)
+	if err != nil {
+		log.Printf("Failed to fetch README from GitHub: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to fetch README: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("GitHub returned non-200 status: %d", resp.StatusCode)
+		http.Error(w, fmt.Sprintf("GitHub returned status: %d", resp.StatusCode), resp.StatusCode)
+		return
+	}
+	
+	// Set headers for markdown file download
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=\"README.md\"")
+	
+	// Copy the content directly from GitHub to the response
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		log.Printf("Failed to copy README content: %v", err)
+		return
+	}
+	
+	log.Printf("Successfully served README.md from GitHub")
+}
+
+// uploadBase64Handler handles file uploads sent as base64 JSON from the TypeScript worker
+func uploadBase64Handler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Upload base64 handler called")
+	
+	// Only allow POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// Parse JSON request
+	var req struct {
+		VideoData    string `json:"video_data"`
+		Filename     string `json:"filename"`
+		FileSize     int64  `json:"file_size"`
+		OutputFormat string `json:"output_format"`
+		InstanceId   string `json:"instance_id"`
+	}
+
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		log.Printf("Failed to parse JSON request: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to parse request: %v", err),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	log.Printf("Received base64 upload: %s, size: %d bytes (%.2f MB)", req.Filename, req.FileSize, float64(req.FileSize)/(1024*1024))
+
+	// Check file size (50MB limit for testing)
+	const maxFileSize = 50 * 1024 * 1024 // 50MB
+	if req.FileSize > maxFileSize {
+		log.Printf("File too large: %d bytes (max: %d)", req.FileSize, maxFileSize)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("File too large (%.1f MB). Maximum supported: 50MB", float64(req.FileSize)/(1024*1024)),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Validate output format
+	outputFormat := req.OutputFormat
+	if outputFormat == "" {
+		outputFormat = "mp3"
+	}
+	validFormats := map[string]bool{"mp3": true, "wav": true, "aac": true, "flac": true}
+	if !validFormats[outputFormat] {
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Unsupported output format: %s. Supported: mp3, wav, aac, flac", outputFormat),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	instanceId := req.InstanceId
+	if instanceId == "" {
+		instanceId = "upload"
+	}
+
+	// Decode base64 video data
+	log.Printf("Decoding base64 video data...")
+	videoData, err := base64.StdEncoding.DecodeString(req.VideoData)
+	if err != nil {
+		log.Printf("Failed to decode base64 video data: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to decode video data: %v", err),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Create temp directory
+	tempDir := "/tmp/processing"
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		log.Printf("Failed to create temp directory: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create temp directory: %v", err),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Generate filenames
+	timestamp := time.Now().UnixMilli()
+	videoFile := filepath.Join(tempDir, fmt.Sprintf("upload_%s_%d%s", instanceId, timestamp, filepath.Ext(req.Filename)))
+	audioFile := filepath.Join(tempDir, fmt.Sprintf("audio_%s_%d.%s", instanceId, timestamp, outputFormat))
+
+	log.Printf("Saving video to: %s", videoFile)
+
+	// Save video data to file
+	err = os.WriteFile(videoFile, videoData, 0644)
+	if err != nil {
+		log.Printf("Failed to save video file: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to save video file: %v", err),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	defer os.Remove(videoFile) // Clean up
+
+	log.Printf("Video saved successfully, starting FFmpeg processing")
+
+	// Process with FFmpeg
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	log.Printf("Starting FFmpeg processing with %s format (file size: %.2f MB), timeout: 30s", 
+		outputFormat, float64(req.FileSize)/(1024*1024))
+
+	var cmd *exec.Cmd
+	switch outputFormat {
+	case "wav":
+		cmd = exec.CommandContext(ctx, "ffmpeg", "-i", videoFile, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-y", audioFile)
+	case "flac":
+		cmd = exec.CommandContext(ctx, "ffmpeg", "-i", videoFile, "-vn", "-acodec", "flac", "-ar", "44100", "-y", audioFile)
+	case "aac":
+		cmd = exec.CommandContext(ctx, "ffmpeg", "-i", videoFile, "-vn", "-acodec", "aac", "-ab", "192k", "-ar", "44100", "-y", audioFile)
+	default: // mp3
+		cmd = exec.CommandContext(ctx, "ffmpeg", "-i", videoFile, "-vn", "-acodec", "mp3", "-ab", "192k", "-ar", "44100", "-y", audioFile)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("FFmpeg failed: %v, output: %s", err, string(output))
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("ffmpeg failed: %v, stderr: %s", err, string(output)),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	log.Printf("FFmpeg processing completed successfully")
+
+	// Read processed audio and return as base64
+	audioInfo, err := os.Stat(audioFile)
+	if err != nil {
+		log.Printf("Failed to get audio file info: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to get audio file info: %v", err),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	audioSize := audioInfo.Size()
+	audioSizeMB := float64(audioSize) / (1024 * 1024)
+	audioFileName := fmt.Sprintf("audio_%s_%d.%s", instanceId, timestamp, outputFormat)
+	
+	log.Printf("Processed audio file: %s (size: %.2f MB)", audioFileName, audioSizeMB)
+	
+	// Read and encode audio file
+	audioData, err := os.ReadFile(audioFile)
+	if err != nil {
+		log.Printf("Failed to read processed audio file: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to read processed audio: %v", err),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	defer os.Remove(audioFile) // Clean up
+	
+	// Encode audio data as base64
+	audioBase64 := base64.StdEncoding.EncodeToString(audioData)
+	
+	response := FFmpegResponse{
+		Success:     true,
+		Message:     "Audio extracted from uploaded file successfully",
+		DownloadURL: fmt.Sprintf("/download/%s", audioFileName),
+		FileName:    audioFileName,
+		R2Key:       audioFileName,
+		AudioURL:    fmt.Sprintf("/download/%s", audioFileName),
+		AudioData:   audioBase64,
+	}
+	
+	log.Printf("Upload processing completed: %s", audioFileName)
+	json.NewEncoder(w).Encode(response)
+}
+
+// uploadHandler handles direct file uploads from frontend
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Upload handler called")
+	
+	// Only allow POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse the multipart form (64MB max memory to handle larger files)
+	log.Printf("Starting multipart form parsing...")
+	err := r.ParseMultipartForm(64 << 20) // 64MB
+	if err != nil {
+		log.Printf("Failed to parse multipart form: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to parse form: %v", err), http.StatusBadRequest)
+		return
+	}
+	log.Printf("Multipart form parsed successfully")
+
+	// Get the uploaded file
+	log.Printf("Getting file from form...")
+	file, header, err := r.FormFile("video")
+	if err != nil {
+		log.Printf("Failed to get file from form: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to get uploaded file: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	log.Printf("Received file upload: %s, size: %d bytes (%.2f MB)", header.Filename, header.Size, float64(header.Size)/(1024*1024))
+
+	// Check file size (200MB limit)
+	const maxFileSize = 200 * 1024 * 1024 // 200MB
+	if header.Size > maxFileSize {
+		log.Printf("File too large: %d bytes (max: %d)", header.Size, maxFileSize)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("File too large (%.1f MB). Maximum supported: 200MB", float64(header.Size)/(1024*1024)),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Get output format from form (default to mp3)
+	outputFormat := r.FormValue("output_format")
+	if outputFormat == "" {
+		outputFormat = "mp3"
+	}
+
+	// Validate output format
+	validFormats := map[string]bool{"mp3": true, "wav": true, "aac": true, "flac": true}
+	if !validFormats[outputFormat] {
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Unsupported output format: %s. Supported: mp3, wav, aac, flac", outputFormat),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Get instance ID from URL path or form
+	instanceId := r.FormValue("instance_id")
+	if instanceId == "" {
+		instanceId = "upload"
+	}
+
+	// Create temp directory
+	tempDir := "/tmp/processing"
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		log.Printf("Failed to create temp directory: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create temp directory: %v", err),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Generate filenames
+	timestamp := time.Now().UnixMilli()
+	videoFile := filepath.Join(tempDir, fmt.Sprintf("upload_%s_%d%s", instanceId, timestamp, filepath.Ext(header.Filename)))
+	audioFile := filepath.Join(tempDir, fmt.Sprintf("audio_%s_%d.%s", instanceId, timestamp, outputFormat))
+
+	log.Printf("Saving uploaded file to: %s", videoFile)
+
+	// Save uploaded file to temp location
+	videoFileHandle, err := os.Create(videoFile)
+	if err != nil {
+		log.Printf("Failed to create temp file: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create temp file: %v", err),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	defer videoFileHandle.Close()
+	defer os.Remove(videoFile) // Clean up
+
+	// Copy uploaded file to temp location with progress logging
+	log.Printf("Starting file copy operation...")
+	bytesWritten, err := io.Copy(videoFileHandle, file)
+	if err != nil {
+		log.Printf("Failed to save uploaded file: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to save uploaded file: %v", err),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	videoFileHandle.Close() // Close before FFmpeg processing
+
+	log.Printf("File saved successfully! Wrote %d bytes, starting FFmpeg processing", bytesWritten)
+
+	// Process with FFmpeg using same logic as URL-based processing
+	w.Header().Set("Content-Type", "application/json")
+
+	// Process the uploaded video file with FFmpeg
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Shorter timeout for testing
+	defer cancel()
+
+	log.Printf("Starting FFmpeg processing with %s format (file size: %.2f MB), timeout: 30s", 
+		outputFormat, float64(header.Size)/(1024*1024))
+
+	var cmd *exec.Cmd
+	switch outputFormat {
+	case "wav":
+		cmd = exec.CommandContext(ctx, "ffmpeg", "-i", videoFile, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-y", audioFile)
+	case "flac":
+		cmd = exec.CommandContext(ctx, "ffmpeg", "-i", videoFile, "-vn", "-acodec", "flac", "-ar", "44100", "-y", audioFile)
+	case "aac":
+		cmd = exec.CommandContext(ctx, "ffmpeg", "-i", videoFile, "-vn", "-acodec", "aac", "-ab", "192k", "-ar", "44100", "-y", audioFile)
+	default: // mp3
+		cmd = exec.CommandContext(ctx, "ffmpeg", "-i", videoFile, "-vn", "-acodec", "mp3", "-ab", "192k", "-ar", "44100", "-y", audioFile)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("FFmpeg failed: %v, output: %s", err, string(output))
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("ffmpeg failed: %v, stderr: %s", err, string(output)),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	log.Printf("FFmpeg processing completed successfully")
+
+	// Read the processed audio file and encode as base64 for R2 upload
+	// But only for smaller files to avoid Cloudflare limits
+	audioInfo, err := os.Stat(audioFile)
+	if err != nil {
+		log.Printf("Failed to get audio file info: %v", err)
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to get audio file info: %v", err),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	audioSize := audioInfo.Size()
+	audioSizeMB := float64(audioSize) / (1024 * 1024)
+	audioFileName := fmt.Sprintf("audio_%s_%d.%s", instanceId, timestamp, outputFormat)
+	
+	log.Printf("Processed audio file: %s (size: %.2f MB)", audioFileName, audioSizeMB)
+	
+	// If audio file is small enough (< 10MB), include it in response for R2 upload
+	// Otherwise, we'll need to implement direct R2 upload from container
+	if audioSize < 10*1024*1024 { // 10MB limit
+		audioData, err := os.ReadFile(audioFile)
+		if err != nil {
+			log.Printf("Failed to read processed audio file: %v", err)
+			response := FFmpegResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to read processed audio: %v", err),
+			}
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		
+		// Encode audio data as base64 for transfer
+		audioBase64 := base64.StdEncoding.EncodeToString(audioData)
+		
+		response := FFmpegResponse{
+			Success:     true,
+			Message:     "Audio extracted from uploaded file and ready for storage",
+			DownloadURL: fmt.Sprintf("/download/%s", audioFileName),
+			FileName:    audioFileName,
+			R2Key:       audioFileName,
+			AudioURL:    fmt.Sprintf("/download/%s", audioFileName),
+			AudioData:   audioBase64,
+		}
+		
+		log.Printf("Upload processing completed: %s (included in response)", audioFileName)
+		json.NewEncoder(w).Encode(response)
+	} else {
+		// File too large for response - need direct R2 upload or return error
+		response := FFmpegResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Processed audio too large (%.1f MB) for direct upload. Use URL-based processing for large files.", audioSizeMB),
+		}
+		json.NewEncoder(w).Encode(response)
+	}
+	
+	// Clean up the audio file
+	defer os.Remove(audioFile)
+}
+
 // ProgressCallback is a function type for progress updates
 type ProgressCallback func(stage, message string, progress float64)
 
@@ -150,6 +600,9 @@ type FFmpegResponse struct {
 	Message       string `json:"message"`
 	AudioData     string `json:"audio_data,omitempty"`
 	AudioURL      string `json:"audio_url,omitempty"`
+	DownloadURL   string `json:"download_url,omitempty"`
+	FileName      string `json:"file_name,omitempty"`
+	R2Key         string `json:"r2_key,omitempty"`
 	Error         string `json:"error,omitempty"`
 	VideoTitle    string `json:"video_title,omitempty"`
 	Duration      string `json:"duration,omitempty"`
@@ -398,11 +851,14 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
 	router := http.NewServeMux()
-	router.HandleFunc("/", handler)
-	router.HandleFunc("/container", handler)
-	router.HandleFunc("/error", errorHandler)
+	router.HandleFunc("/readme", readmeHandler)
 	router.HandleFunc("/ffmpeg/extract-audio", ffmpegHandler)
+	router.HandleFunc("/ffmpeg/upload", uploadHandler)
+	router.HandleFunc("/ffmpeg/upload-base64", uploadBase64Handler)
 	router.HandleFunc("/download/", downloadHandler)
+	router.HandleFunc("/error", errorHandler)
+	router.HandleFunc("/container", handler)
+	router.HandleFunc("/", handler)
 
 	server := &http.Server{
 		Addr:    ":8080",

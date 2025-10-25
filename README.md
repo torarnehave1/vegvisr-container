@@ -1,16 +1,64 @@
-# Containers Starter
+# 🎵 Vegvisr Container - Video-to-Audio Conversion Service
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/templates/tree/main/containers-template)
 
 ![Containers Template Preview](https://imagedelivery.net/_yJ02hpOMj_EnGvsU2aygw/5aba1fb7-b937-46fd-fa67-138221082200/public)
 
-<!-- dash-content-start -->
+## 🎯 What This Service Does
 
-This is a [Container](https://developers.cloudflare.com/containers/) starter template.
+**Vegvisr Container** is a powerful **Cloudflare Workers-based video-to-audio conversion service** with cloud storage capabilities. It provides a robust, scalable API for extracting high-quality audio from video files using FFmpeg and storing them in Cloudflare R2 cloud storage.
 
-It demonstrates basic Container configuration, launching and routing to individual container, load balancing over multiple container, running basic hooks on container status changes.
+### 🎵 Core Functionality
 
-<!-- dash-content-end -->
+**Primary Purpose:** Extract audio (MP3, WAV, AAC, FLAC) from video files using FFmpeg and store them in Cloudflare R2 cloud storage with global CDN distribution.
+
+### 🚀 Key Features
+
+- **🔗 URL Processing:** Download videos from any public URL and extract audio
+- **📤 Direct Upload:** Accept video file uploads directly from frontend applications  
+- **☁️ Cloud Storage:** Automatic storage in Cloudflare R2 with global distribution
+- **⚡ High Performance:** Chunked downloading supports files up to 200MB
+- **🎛️ Multiple Formats:** Output as MP3, WAV, AAC, or FLAC
+- **📊 Progress Tracking:** Real-time file size detection and processing updates
+- **🌍 Global Access:** Worldwide availability via Cloudflare's edge network
+- **🔄 Scalable:** Multiple container instances for concurrent processing
+- **📚 Self-Documenting:** Built-in API documentation and examples
+
+### 💼 Use Cases
+
+- **🎙️ Content Creation:** Convert video content to audio for podcasts and media production
+- **🎬 Media Processing:** Batch convert video libraries to audio formats
+- **🌐 Web Applications:** Backend service for video-to-audio conversion in web apps
+- **📱 Social Media:** Extract audio from video posts and content
+- **🎓 Education:** Convert educational videos to audio format for accessibility
+- **♿ Accessibility:** Provide audio alternatives for video content
+- **🏢 Enterprise:** Integrate into content management systems and workflows
+
+### 🏗️ Architecture Overview
+
+**Technology Stack:**
+- **⚡ Runtime:** Cloudflare Workers with Containers (Durable Objects)
+- **🐧 Container:** Alpine Linux with FFmpeg v6.1.2
+- **🔧 Backend:** Go HTTP server for high-performance video processing
+- **🌐 Frontend:** TypeScript/Hono for routing and R2 integration
+- **💾 Storage:** Cloudflare R2 bucket with S3-compatible API
+- **🔒 Security:** Container isolation and input validation
+
+**Processing Flow:**
+1. **📥 Input:** Accept video via URL or direct file upload
+2. **⬇️ Download:** Chunked downloading with progress tracking (5MB chunks)
+3. **🎵 Extract:** FFmpeg audio extraction with configurable quality settings
+4. **☁️ Upload:** Automatic upload to Cloudflare R2 storage
+5. **🔗 Access:** Provide global download URL for immediate access
+
+### 📊 Technical Specifications
+
+- **📏 File Size Limit:** 200MB with chunked downloading
+- **⏱️ Processing Timeout:** 60 seconds for FFmpeg processing
+- **🏃 Container Timeout:** 2 minutes before auto-sleep (restart on demand)
+- **🔄 Concurrency:** Unlimited parallel processing with unique instance IDs
+- **🌐 Global Distribution:** Cloudflare's 200+ edge locations
+- **📈 Reliability:** Automatic error handling and recovery
 
 Outside of this repo, you can start a new project with this template using [C3](https://developers.cloudflare.com/pages/get-started/c3/) (the `create-cloudflare` CLI):
 
@@ -80,8 +128,10 @@ https://vegvisr-container.torarnehave.workers.dev
 | Method | Endpoint | Description | Status |
 |--------|----------|-------------|---------|
 | `GET` | `/` | List all available endpoints | ✅ Active |
-| `POST` | `/ffmpeg/{instance-id}` | Extract audio from video (200MB max, chunked download) | ✅ Active |
+| `POST` | `/ffmpeg/{instance-id}` | Extract audio from video URL (200MB max, chunked download) | ✅ Active |
+| `POST` | `/upload/{instance-id}` | Upload video files directly (auto-handles small & large files up to 100MB) | ✅ Active |
 | `GET` | `/download/{filename}` | Download extracted audio from R2 storage | ✅ Active |
+| `GET` | `/readme` | Download README.md documentation from GitHub | ✅ Active |
 | `GET` | `/container/{instance-id}` | Direct container access with 2m timeout | ✅ Active |
 | `GET` | `/singleton` | Get singleton container instance | ✅ Active |
 | `GET` | `/lb` | Load-balanced requests over multiple containers | ✅ Active |
@@ -89,7 +139,7 @@ https://vegvisr-container.torarnehave.workers.dev
 
 ### 🎯 How to Extract Audio
 
-#### 1. Basic Usage
+#### 1. Basic Usage (URL-based)
 
 Send a POST request with a video URL:
 
@@ -110,14 +160,55 @@ curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/my-audio-
 }
 ```
 
-#### 2. Download the Extracted Audio
+#### 2. Upload Files Directly (All Sizes - Smart Auto-Detection)
+
+**ONE endpoint handles everything - from screenshots to 10-minute presentations!**
+
+```bash
+# Small files (< 15MB) - uses direct processing
+curl -X POST \
+  -F "video=@screenshot.mp4" \
+  -F "output_format=mp3" \
+  https://vegvisr-container.torarnehave.workers.dev/upload/my-job
+
+# Large files (15-100MB) - automatically uploads to R2 first
+curl -X POST \
+  -F "video=@presentation.mov" \
+  -F "output_format=mp3" \
+  https://vegvisr-container.torarnehave.workers.dev/upload/my-presentation \
+  --max-time 120
+```
+
+**How it works (automatically):**
+- **Files ≤ 15MB**: Direct processing (fast, ~5-15 seconds)
+- **Files > 15MB**: Uploads to R2 first, then processes (handles up to 100MB, ~30-60 seconds)
+
+**Perfect for:**
+- ✅ Screenshots and short clips
+- ✅ QuickTime screen recordings (.mov)
+- ✅ 10-minute presentations (tested with 26MB .mov file)
+- ✅ File sizes up to 100MB
+
+**Example Response:**
+```json
+{
+  "success": true,
+  "message": "Audio extracted from uploaded file successfully",
+  "download_url": "/download/audio_my-presentation_1761395200609.mp3",
+  "file_name": "audio_my-presentation_1761395200609.mp3",
+  "r2_key": "audio_my-presentation_1761395200609.mp3",
+  "audio_url": "/download/audio_my-presentation_1761395200609.mp3"
+}
+```
+
+#### 3. Download the Extracted Audio
 
 ```bash
 curl "https://vegvisr-container.torarnehave.workers.dev/download/audio_my-audio-job_1760939604006.mp3" \
   -o extracted_audio.mp3
 ```
 
-#### 3. Real Examples (Tested & Working)
+#### 4. Real Examples (Tested & Working)
 
 ```bash
 # Example 1: Extract from 13MB video (ForBiggerBlazes.mp4)
@@ -133,9 +224,20 @@ curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/test-larg
   -d '{"video_url": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4", "output_format": "mp3"}'
 
 # Both examples demonstrate chunked downloading handling files larger than 5MB
+
+# Example 3: Upload 26MB QuickTime screen recording (tested successfully)
+# ONE unified endpoint automatically handles large files!
+curl -X POST \
+  -F "video=@screen-recording.mov" \
+  -F "output_format=mp3" \
+  https://vegvisr-container.torarnehave.workers.dev/upload/my-presentation \
+  --max-time 120
+
+# Response: {"success":true,"message":"Audio extracted from uploaded file successfully"...}
+# The endpoint automatically detected it's a large file and uploaded to R2 first!
 ```
 
-#### 4. Using JavaScript/Node.js
+#### 5. Using JavaScript/Node.js
 
 ```javascript
 async function extractAndDownloadAudio(videoUrl, instanceId = 'default') {
@@ -179,7 +281,7 @@ extractAndDownloadAudio('https://example.com/my-video.mp4', 'my-job')
   .catch(error => console.error('❌ Error:', error));
 ```
 
-#### 5. Using Python
+#### 6. Using Python
 
 ```python
 import requests
@@ -221,7 +323,7 @@ except Exception as e:
     print(f'Error: {e}')
 ```
 
-#### 6. Complete Workflow Script
+#### 7. Complete Workflow Script
 
 ```bash
 #!/bin/bash
@@ -371,7 +473,79 @@ Content-Type: application/json
 }
 ```
 
-#### 3. 📥 Download Extracted Audio
+#### 3. � Direct File Upload
+
+**Endpoint:** `POST /upload/{instance-id}`
+
+**Description:** Upload video files directly from frontend applications for audio extraction
+
+**Parameters:**
+- `instance-id` (path): Unique identifier for the processing job (URL-safe string)
+
+**Request Headers:**
+```
+Content-Type: multipart/form-data
+```
+
+**Request Body (multipart/form-data):**
+```
+video: [File] (required) - Video file to process
+output_format: string (optional) - Audio format: mp3, aac, wav, flac (default: mp3)
+instance_id: string (optional) - Override instance ID from URL path
+```
+
+**File Size Limits:**
+- Maximum: 200MB per upload
+- Supported formats: MP4, AVI, MOV, MKV, WebM, FLV, 3GP, WMV, and all FFmpeg-supported formats
+- Processing timeout: 60 seconds for FFmpeg
+
+**Success Response (200 OK):**
+```json
+{
+  "success": true,
+  "message": "Audio extracted from uploaded file and stored successfully",
+  "download_url": "/download/audio_instanceid_timestamp.mp3",
+  "file_name": "audio_instanceid_timestamp.mp3", 
+  "r2_key": "audio_instanceid_timestamp.mp3",
+  "audio_url": "/download/audio_instanceid_timestamp.mp3"
+}
+```
+
+**Error Responses:**
+
+**400 Bad Request - No file uploaded:**
+```json
+{
+  "success": false,
+  "error": "Failed to get uploaded file: http: no such file"
+}
+```
+
+**400 Bad Request - File too large:**
+```json
+{
+  "success": false,
+  "error": "File too large (250.5 MB). Maximum supported: 200MB"
+}
+```
+
+**400 Bad Request - Unsupported format:**
+```json
+{
+  "success": false,
+  "error": "Unsupported output format: xyz. Supported: mp3, wav, aac, flac"
+}
+```
+
+**500 Internal Server Error - Processing failed:**
+```json
+{
+  "success": false,
+  "error": "ffmpeg failed: exit status 1, stderr: [error details]"
+}
+```
+
+#### 4. �📥 Download Extracted Audio
 
 **Endpoint:** `GET /download/{filename}`
 
@@ -390,7 +564,7 @@ Content-Disposition: attachment; filename="{filename}"
 
 **Error Response (404 Not Found):** File not found in R2 storage
 
-#### 4. 🚀 Container Management Endpoints
+#### 5. 🚀 Container Management Endpoints
 
 **Direct Container Access:** `GET /container/{instance-id}`
 - Creates or connects to specific container instance
@@ -434,6 +608,134 @@ curl -X POST "https://vegvisr-container.torarnehave.workers.dev/ffmpeg/job123" \
 ```bash
 curl "https://vegvisr-container.torarnehave.workers.dev/download/audio_job123_1761032972174.mp3" \
   -o extracted_audio.mp3
+```
+
+**Upload video file directly:**
+```bash
+curl -X POST "https://vegvisr-container.torarnehave.workers.dev/upload/upload-job-123" \
+  -F "video=@/path/to/your/video.mp4" \
+  -F "output_format=mp3"
+```
+
+**Upload with specific format:**
+```bash
+curl -X POST "https://vegvisr-container.torarnehave.workers.dev/upload/upload-job-456" \
+  -F "video=@/path/to/your/video.mov" \
+  -F "output_format=wav"
+```
+
+#### HTML File Upload Form
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video to Audio Converter</title>
+</head>
+<body>
+    <h2>🎵 Upload Video for Audio Extraction</h2>
+    
+    <form id="uploadForm" enctype="multipart/form-data">
+        <div>
+            <label for="videoFile">Select Video File (Max 200MB):</label><br>
+            <input type="file" id="videoFile" name="video" accept="video/*" required>
+        </div>
+        
+        <div>
+            <label for="format">Output Format:</label><br>
+            <select id="format" name="output_format">
+                <option value="mp3">MP3 (Default)</option>
+                <option value="wav">WAV (High Quality)</option>
+                <option value="aac">AAC (Compressed)</option>
+                <option value="flac">FLAC (Lossless)</option>
+            </select>
+        </div>
+        
+        <div>
+            <button type="submit">🎵 Extract Audio</button>
+        </div>
+    </form>
+    
+    <div id="progress" style="display: none;">
+        <p>⏳ Processing your video...</p>
+        <progress id="progressBar" style="width: 100%;"></progress>
+    </div>
+    
+    <div id="result" style="display: none;">
+        <h3>✅ Audio Extracted Successfully!</h3>
+        <p id="resultMessage"></p>
+        <a id="downloadLink" href="#" download>📥 Download Audio File</a>
+    </div>
+    
+    <div id="error" style="display: none; color: red;">
+        <h3>❌ Error</h3>
+        <p id="errorMessage"></p>
+    </div>
+
+    <script>
+        document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('videoFile');
+            const formatSelect = document.getElementById('format');
+            const progressDiv = document.getElementById('progress');
+            const resultDiv = document.getElementById('result');
+            const errorDiv = document.getElementById('error');
+            
+            if (!fileInput.files[0]) {
+                alert('Please select a video file');
+                return;
+            }
+            
+            // Check file size (200MB limit)
+            const file = fileInput.files[0];
+            const maxSize = 200 * 1024 * 1024; // 200MB
+            if (file.size > maxSize) {
+                alert(`File too large (${(file.size / (1024*1024)).toFixed(1)}MB). Maximum: 200MB`);
+                return;
+            }
+            
+            // Hide previous results
+            resultDiv.style.display = 'none';
+            errorDiv.style.display = 'none';
+            progressDiv.style.display = 'block';
+            
+            try {
+                const formData = new FormData();
+                formData.append('video', file);
+                formData.append('output_format', formatSelect.value);
+                
+                const instanceId = 'upload-' + Date.now();
+                const response = await fetch(`https://vegvisr-container.torarnehave.workers.dev/upload/${instanceId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                progressDiv.style.display = 'none';
+                
+                if (result.success) {
+                    document.getElementById('resultMessage').textContent = 
+                        `File processed: ${result.file_name}`;
+                    document.getElementById('downloadLink').href = 
+                        `https://vegvisr-container.torarnehave.workers.dev${result.download_url}`;
+                    document.getElementById('downloadLink').download = result.file_name;
+                    resultDiv.style.display = 'block';
+                } else {
+                    document.getElementById('errorMessage').textContent = result.error;
+                    errorDiv.style.display = 'block';
+                }
+            } catch (error) {
+                progressDiv.style.display = 'none';
+                document.getElementById('errorMessage').textContent = 
+                    'Network error: ' + error.message;
+                errorDiv.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>
 ```
 
 #### JavaScript/TypeScript Integration
@@ -486,6 +788,45 @@ class AudioExtractionAPI {
     return await response.blob();
   }
 
+  async uploadVideo(
+    videoFile: File,
+    instanceId: string = `upload-${Date.now()}`,
+    format: 'mp3' | 'aac' | 'wav' | 'flac' = 'mp3'
+  ): Promise<FFmpegResponse> {
+    // Check file size (200MB limit)
+    const maxSize = 200 * 1024 * 1024; // 200MB
+    if (videoFile.size > maxSize) {
+      throw new Error(`File too large (${(videoFile.size / (1024*1024)).toFixed(1)}MB). Maximum: 200MB`);
+    }
+
+    const formData = new FormData();
+    formData.append('video', videoFile);
+    formData.append('output_format', format);
+
+    const response = await fetch(`${this.baseUrl}/upload/${instanceId}`, {
+      method: 'POST',
+      body: formData
+    });
+
+    return await response.json();
+  }
+
+  async uploadAndDownload(
+    videoFile: File,
+    instanceId?: string,
+    format?: 'mp3' | 'aac' | 'wav' | 'flac'
+  ): Promise<{ metadata: FFmpegResponse; audio: Blob }> {
+    const result = await this.uploadVideo(videoFile, instanceId, format);
+    
+    if (!result.success || !result.file_name) {
+      throw new Error(result.error || 'Upload processing failed');
+    }
+    
+    const audio = await this.downloadAudio(result.file_name);
+    
+    return { metadata: result, audio };
+  }
+
   async extractAndDownload(
     videoUrl: string, 
     instanceId?: string, 
@@ -503,12 +844,13 @@ class AudioExtractionAPI {
   }
 }
 
-// Usage
+// Usage Examples
 const api = new AudioExtractionAPI();
 
+// Extract from URL
 api.extractAndDownload('https://example.com/video.mp4', 'my-job', 'mp3')
   .then(({ metadata, audio }) => {
-    console.log('✅ Success:', metadata);
+    console.log('✅ URL Processing Success:', metadata);
     console.log('🎵 Audio blob size:', audio.size, 'bytes');
     
     // Create download link
@@ -519,7 +861,49 @@ api.extractAndDownload('https://example.com/video.mp4', 'my-job', 'mp3')
     a.click();
     URL.revokeObjectURL(url);
   })
-  .catch(error => console.error('❌ Error:', error));
+  .catch(error => console.error('❌ URL Processing Error:', error));
+
+// Upload file directly (from file input)
+const fileInput = document.getElementById('videoFile') as HTMLInputElement;
+if (fileInput.files && fileInput.files[0]) {
+  const videoFile = fileInput.files[0];
+  
+  api.uploadAndDownload(videoFile, 'upload-job-123', 'wav')
+    .then(({ metadata, audio }) => {
+      console.log('✅ Upload Processing Success:', metadata);
+      console.log('🎵 Audio blob size:', audio.size, 'bytes');
+      
+      // Create download link  
+      const url = URL.createObjectURL(audio);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = metadata.file_name || 'audio.wav';
+      a.click();
+      URL.revokeObjectURL(url);
+    })
+    .catch(error => console.error('❌ Upload Processing Error:', error));
+}
+
+// Advanced: Upload with progress tracking
+async function uploadWithProgress(file: File) {
+  try {
+    console.log(`📤 Uploading ${file.name} (${(file.size / (1024*1024)).toFixed(1)}MB)`);
+    
+    const result = await api.uploadVideo(file, `upload-${Date.now()}`, 'mp3');
+    
+    if (result.success) {
+      console.log('🎵 Processing complete!');
+      const audio = await api.downloadAudio(result.file_name!);
+      console.log(`📥 Downloaded ${audio.size} bytes`);
+      return audio;
+    } else {
+      throw new Error(result.error);
+    }
+  } catch (error) {
+    console.error('❌ Upload failed:', error);
+    throw error;
+  }
+}
 ```
 
 #### Python Integration
